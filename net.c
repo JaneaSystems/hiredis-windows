@@ -34,6 +34,7 @@
 
 #include "fmacros.h"
 #include <sys/types.h>
+#ifndef _MSC_VER
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/un.h>
@@ -41,13 +42,18 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <string.h>
 #include <netdb.h>
+#include <poll.h>
+#else
+#include <io.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <poll.h>
+#include <fcntl.h>
+#include <string.h>
 #include <limits.h>
 #include <stdlib.h>
 
@@ -59,7 +65,11 @@ void __redisSetError(redisContext *c, int type, const char *str);
 
 static void redisContextCloseFd(redisContext *c) {
     if (c && c->fd >= 0) {
+#ifndef _MSC_VER
         close(c->fd);
+#else
+        closesocket(c->fd);
+#endif
         c->fd = -1;
     }
 }
@@ -67,16 +77,37 @@ static void redisContextCloseFd(redisContext *c) {
 static void __redisSetErrorFromErrno(redisContext *c, int type, const char *prefix) {
     char buf[128] = { 0 };
     size_t len = 0;
+#ifdef _MSC_VER
+    int err = WSAGetLastError();
+    wchar_t *wmessage = NULL;
+#endif
 
     if (prefix != NULL)
         len = snprintf(buf,sizeof(buf),"%s: ",prefix);
     __redis_strerror_r(errno, (char *)(buf + len), sizeof(buf) - len);
+#ifdef _MSC_VER
+    len = strlen(buf);
+    len += snprintf((char *)(buf + len), sizeof(buf) - len, ", WSAGetLastError %d ", err);
+
+    FormatMessage (FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, // flags
+                   NULL,                                       // lpsource
+                   err,                                        // message id
+                   MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT), // languageid
+                   &wmessage,                                  // output buffer
+                   0,                                          // size of msgbuf, bytes
+                   NULL);                                      // va_list of arguments
+
+    wcstombs((char *)(buf + len), wmessage, sizeof(buf) - len);
+
+    LocalFree(wmessage);
+    wmessage = NULL;
+#endif
     __redisSetError(c,type,buf);
 }
 
 static int redisSetReuseAddr(redisContext *c) {
     int on = 1;
-    if (setsockopt(c->fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+    if (setsockopt(c->fd, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, sizeof(on)) == -1) {
         __redisSetErrorFromErrno(c,REDIS_ERR_IO,NULL);
         redisContextCloseFd(c);
         return REDIS_ERR;
@@ -100,6 +131,7 @@ static int redisCreateSocket(redisContext *c, int type) {
 }
 
 static int redisSetBlocking(redisContext *c, int blocking) {
+#ifndef _MSC_VER
     int flags;
 
     /* Set the socket nonblocking.
@@ -121,6 +153,12 @@ static int redisSetBlocking(redisContext *c, int blocking) {
         redisContextCloseFd(c);
         return REDIS_ERR;
     }
+#else
+    u_long iMode = !blocking;
+    int iResult = ioctlsocket(c->fd, FIONBIO, &iMode);
+    if (iResult != NO_ERROR)
+        __redisSetErrorFromErrno(c,REDIS_ERR_IO,"ioctlsocket(FIONBIO)");
+#endif
     return REDIS_OK;
 }
 
@@ -128,7 +166,7 @@ int redisKeepAlive(redisContext *c, int interval) {
     int val = 1;
     int fd = c->fd;
 
-    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) == -1){
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*) &val, sizeof(val)) == -1){
         __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
         return REDIS_ERR;
     }
@@ -168,7 +206,11 @@ int redisKeepAlive(redisContext *c, int interval) {
 
 static int redisSetTcpNoDelay(redisContext *c) {
     int yes = 1;
-    if (setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) == -1) {
+// https://github.com/redis/hiredis/issues/785
+#if _MSC_VER
+    Sleep(100);
+#endif
+    if (setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, (const char*) &yes, sizeof(yes)) == -1) {
         __redisSetErrorFromErrno(c,REDIS_ERR_IO,"setsockopt(TCP_NODELAY)");
         redisContextCloseFd(c);
         return REDIS_ERR;
@@ -204,7 +246,11 @@ static int redisContextWaitReady(redisContext *c, const struct timeval *timeout)
     if (errno == EINPROGRESS) {
         int res;
 
+#ifndef _MSC_VER
         if ((res = poll(wfd, 1, msec)) == -1) {
+#else
+        if ((res = WSAPoll(wfd, 1, msec)) == -1) {
+#endif
             __redisSetErrorFromErrno(c, REDIS_ERR_IO, "poll(2)");
             redisContextCloseFd(c);
             return REDIS_ERR;
@@ -230,7 +276,7 @@ int redisCheckSocketError(redisContext *c) {
     int err = 0;
     socklen_t errlen = sizeof(err);
 
-    if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &errlen) == -1) {
+    if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, (char*) &err, &errlen) == -1) {
         __redisSetErrorFromErrno(c,REDIS_ERR_IO,"getsockopt(SO_ERROR)");
         return REDIS_ERR;
     }
@@ -245,11 +291,11 @@ int redisCheckSocketError(redisContext *c) {
 }
 
 int redisContextSetTimeout(redisContext *c, const struct timeval tv) {
-    if (setsockopt(c->fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv)) == -1) {
+    if (setsockopt(c->fd,SOL_SOCKET,SO_RCVTIMEO,(const char*) &tv,sizeof(tv)) == -1) {
         __redisSetErrorFromErrno(c,REDIS_ERR_IO,"setsockopt(SO_RCVTIMEO)");
         return REDIS_ERR;
     }
-    if (setsockopt(c->fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv)) == -1) {
+    if (setsockopt(c->fd,SOL_SOCKET,SO_SNDTIMEO,(const char*) &tv,sizeof(tv)) == -1) {
         __redisSetErrorFromErrno(c,REDIS_ERR_IO,"setsockopt(SO_SNDTIMEO)");
         return REDIS_ERR;
     }
@@ -265,6 +311,17 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
     int blocking = (c->flags & REDIS_BLOCK);
     int reuseaddr = (c->flags & REDIS_REUSEADDR);
     int reuses = 0;
+
+#ifdef _MSC_VER
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    int err = 0;
+
+    wVersionRequested = MAKEWORD(2, 2);
+    if (WSAStartup(wVersionRequested, &wsaData) != 0) {
+        return REDIS_ERR;
+    }
+#endif
 
     c->connection_type = REDIS_CONN_TCP;
     c->tcp.port = port;
@@ -317,7 +374,14 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
     if ((rv = getaddrinfo(c->tcp.host,_port,&hints,&servinfo)) != 0) {
          hints.ai_family = AF_INET6;
          if ((rv = getaddrinfo(addr,_port,&hints,&servinfo)) != 0) {
-            __redisSetError(c,REDIS_ERR_OTHER,gai_strerror(rv));
+#ifndef _MSC_VER
+             const char *message = gai_strerror(rv);
+#else
+             wchar_t *wmessage = gai_strerror(rv);
+             char message [256];
+             wcstombs(message, wmessage, sizeof(message) - 1);
+#endif
+            __redisSetError(c,REDIS_ERR_OTHER,message);
             return REDIS_ERR;
         }
     }
@@ -327,8 +391,10 @@ addrretry:
             continue;
 
         c->fd = s;
+#ifndef _MSC_VER
         if (redisSetBlocking(c,0) != REDIS_OK)
             goto error;
+#endif
         if (c->tcp.source_addr) {
             int bound = 0;
             /* Using getaddrinfo saves us from self-determining IPv4 vs IPv6 */
@@ -362,6 +428,9 @@ addrretry:
             }
         }
         if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
+#ifdef _MSC_VER
+            int err = WSAGetLastError();
+#endif
             if (errno == EHOSTUNREACH) {
                 redisContextCloseFd(c);
                 continue;
@@ -373,6 +442,13 @@ addrretry:
                 } else {
                     goto addrretry;
                 }
+#ifdef _MSC_VER
+            } else if ((err == WSAECONNREFUSED) || (err == WSAENETUNREACH) || (err == WSAETIMEDOUT)) {
+                __redisSetErrorFromErrno(c,REDIS_ERR_IO,"Can't create socket");
+                redisContextCloseFd(c);
+                continue;
+            } else if (err == WSAEWOULDBLOCK) {
+#endif
             } else {
                 if (redisContextWaitReady(c,c->timeout) != REDIS_OK)
                     goto error;
@@ -388,9 +464,11 @@ addrretry:
         goto end;
     }
     if (p == NULL) {
-        char buf[128];
-        snprintf(buf,sizeof(buf),"Can't create socket: %s",strerror(errno));
-        __redisSetError(c,REDIS_ERR_OTHER,buf);
+        if (!c->err) {
+            char buf[128];
+            snprintf(buf,sizeof(buf),"Can't create socket: %s",strerror(errno));
+            __redisSetError(c,REDIS_ERR_OTHER,buf);
+        }
         goto error;
     }
 
@@ -412,6 +490,7 @@ int redisContextConnectBindTcp(redisContext *c, const char *addr, int port,
     return _redisContextConnectTcp(c, addr, port, timeout, source_addr);
 }
 
+#ifndef _MSC_VER
 int redisContextConnectUnix(redisContext *c, const char *path, const struct timeval *timeout) {
     int blocking = (c->flags & REDIS_BLOCK);
     struct sockaddr_un sa;
@@ -456,3 +535,4 @@ int redisContextConnectUnix(redisContext *c, const char *path, const struct time
     c->flags |= REDIS_CONNECTED;
     return REDIS_OK;
 }
+#endif
