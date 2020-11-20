@@ -35,7 +35,12 @@
 #define __HIREDIS_H
 #include "read.h"
 #include <stdarg.h> /* for va_list */
+#ifndef _MSC_VER
 #include <sys/time.h> /* for struct timeval */
+#else
+#include <WinSock2.h>
+#define strerror_r(errno,buf,len) strerror_s(buf,len,errno)
+#endif
 #include <stdint.h> /* uintXX_t, etc */
 #include "sds.h" /* for sds */
 

@@ -34,7 +34,11 @@
 #include "fmacros.h"
 #include <string.h>
 #include <stdlib.h>
+#ifndef _MSC_VER
 #include <unistd.h>
+#else
+#include <io.h>
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <ctype.h>
@@ -402,7 +406,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
 
     pos = sprintf(cmd,"*%d\r\n",argc);
     for (j = 0; j < argc; j++) {
-        pos += sprintf(cmd+pos,"$%zu\r\n",sdslen(curargv[j]));
+        pos += sprintf(cmd+pos,"$%u\r\n",(unsigned int)sdslen(curargv[j]));
         memcpy(cmd+pos,curargv[j],sdslen(curargv[j]));
         pos += sdslen(curargv[j]);
         sdsfree(curargv[j]);
@@ -617,7 +621,11 @@ void redisFree(redisContext *c) {
     if (c == NULL)
         return;
     if (c->fd > 0)
+#ifndef _MSC_VER
         close(c->fd);
+#else
+        closesocket(c->fd);
+#endif
     if (c->obuf != NULL)
         sdsfree(c->obuf);
     if (c->reader != NULL)
@@ -645,7 +653,11 @@ int redisReconnect(redisContext *c) {
     memset(c->errstr, '\0', strlen(c->errstr));
 
     if (c->fd > 0) {
+#ifndef _MSC_VER
         close(c->fd);
+#else
+        closesocket(c->fd);
+#endif
     }
 
     sdsfree(c->obuf);
@@ -657,8 +669,10 @@ int redisReconnect(redisContext *c) {
     if (c->connection_type == REDIS_CONN_TCP) {
         return redisContextConnectBindTcp(c, c->tcp.host, c->tcp.port,
                 c->timeout, c->tcp.source_addr);
+#ifndef _MSC_VER
     } else if (c->connection_type == REDIS_CONN_UNIX) {
         return redisContextConnectUnix(c, c->unix_sock.path, c->timeout);
+#endif
     } else {
         /* Something bad happened here and shouldn't have. There isn't
            enough information in the context to reconnect. */
@@ -724,6 +738,7 @@ redisContext *redisConnectBindNonBlockWithReuse(const char *ip, int port,
     return c;
 }
 
+#ifndef _MSC_VER
 redisContext *redisConnectUnix(const char *path) {
     redisContext *c;
 
@@ -759,6 +774,7 @@ redisContext *redisConnectUnixNonBlock(const char *path) {
     redisContextConnectUnix(c,path,NULL);
     return c;
 }
+#endif
 
 redisContext *redisConnectFd(int fd) {
     redisContext *c;
@@ -799,10 +815,17 @@ int redisBufferRead(redisContext *c) {
     if (c->err)
         return REDIS_ERR;
 
+#ifndef _MSC_VER
     nread = read(c->fd,buf,sizeof(buf));
+#else
+    nread = recv(c->fd,buf,sizeof(buf),0);
+#endif
     if (nread == -1) {
         if ((errno == EAGAIN && !(c->flags & REDIS_BLOCK)) || (errno == EINTR)) {
             /* Try again later */
+#ifdef _MSC_VER
+        } else if ((c->flags & REDIS_BLOCK) && (WSAGetLastError() == WSAEWOULDBLOCK)) {
+#endif
         } else {
             __redisSetError(c,REDIS_ERR_IO,NULL);
             return REDIS_ERR;
@@ -836,7 +859,11 @@ int redisBufferWrite(redisContext *c, int *done) {
         return REDIS_ERR;
 
     if (sdslen(c->obuf) > 0) {
+#ifndef _MSC_VER
         nwritten = write(c->fd,c->obuf,sdslen(c->obuf));
+#else
+        nwritten = send(c->fd,c->obuf,sdslen(c->obuf),0);
+#endif
         if (nwritten == -1) {
             if ((errno == EAGAIN && !(c->flags & REDIS_BLOCK)) || (errno == EINTR)) {
                 /* Try again later */

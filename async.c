@@ -32,7 +32,11 @@
 #include "fmacros.h"
 #include <stdlib.h>
 #include <string.h>
+#ifndef _MSC_VER
 #include <strings.h>
+#else
+#include "win32.h"
+#endif
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -67,8 +71,9 @@ static unsigned int callbackHash(const void *key) {
 }
 
 static void *callbackValDup(void *privdata, const void *src) {
+	struct redisCallback *dup = NULL;
     ((void) privdata);
-    redisCallback *dup = malloc(sizeof(*dup));
+    dup = (struct redisCallback *) malloc(sizeof(*dup));
     memcpy(dup,src,sizeof(*dup));
     return dup;
 }
@@ -141,16 +146,18 @@ static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
 
 /* We want the error field to be accessible directly instead of requiring
  * an indirection to the redisContext struct. */
-static void __redisAsyncCopyError(redisAsyncContext *ac) {
+static void __redisAsyncCopyError(struct redisAsyncContext *ac) {
+    struct redisContext *c = NULL;
+
     if (!ac)
         return;
 
-    redisContext *c = &(ac->c);
+    c = &(ac->c);
     ac->err = c->err;
     ac->errstr = c->errstr;
 }
 
-redisAsyncContext *redisAsyncConnect(const char *ip, int port) {
+struct redisAsyncContext *redisAsyncConnect(const char *ip, int port) {
     redisContext *c;
     redisAsyncContext *ac;
 
@@ -184,6 +191,7 @@ redisAsyncContext *redisAsyncConnectBindWithReuse(const char *ip, int port,
     return ac;
 }
 
+#ifndef _MSC_VER
 redisAsyncContext *redisAsyncConnectUnix(const char *path) {
     redisContext *c;
     redisAsyncContext *ac;
@@ -201,6 +209,7 @@ redisAsyncContext *redisAsyncConnectUnix(const char *path) {
     __redisAsyncCopyError(ac);
     return ac;
 }
+#endif
 
 int redisAsyncSetConnectCallback(redisAsyncContext *ac, redisConnectCallback *fn) {
     if (ac->onConnect == NULL) {
