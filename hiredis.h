@@ -31,8 +31,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-// https://github.com/JaneaSystems/hiredis-windows
-
 #ifndef __HIREDIS_H
 #define __HIREDIS_H
 #include "read.h"
